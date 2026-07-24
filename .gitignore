@@ -1,0 +1,44 @@
+# Python & 虛擬環境與快取
+__pycache__/
+*.py[cod]
+*$py.class
+venv311/
+
+
+# 敏感資訊與環境變數
+*.env
+
+
+# 日誌與暫存資料夾
+logs/
+*.log
+temp/
+
+
+# 數據資料檔、資料庫與文件 
+*.docx
+*.xlsx
+*.xls
+*.db
+*.sqlite3
+*.tmp
+
+# 自訂數據資料夾與文字記錄
+clean_data/
+寶可夢訓練資料/
+文字記錄/
+
+
+# 爬蟲資料與模型權重
+PokeGO_data/
+results/
+
+
+# 字型檔
+Noto-hinted*
+NotoSansCJKtc-Regular*
+
+
+# 6. IDE / VS Code 設定檔
+.vscode/
+.DS_Store

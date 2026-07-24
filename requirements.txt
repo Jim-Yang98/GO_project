@@ -1,0 +1,33 @@
+# 爬蟲 (Crawlers)
+requests>=2.34.0
+beautifulsoup4>=4.15.0
+selenium>=4.46.0
+webdriver-manager>=4.1.2
+DrissionPage>=4.1.0
+
+
+# 資料處理與分析
+pandas>=3.0.0
+numpy>=2.5.0
+openpyxl>=3.1.0       # 讀寫 Excel .xlsx 需要
+pyarrow>=25.0.0       # Pandas 處理巨量資料/Parquet 所需
+jieba>=0.42.0         # 中文斷詞
+
+
+# 機器學習與 BERT 模型 (ML & NLP)
+torch>=2.13.0
+transformers>=5.14.0
+datasets>=5.0.0
+scikit-learn>=1.9.0
+safetensors>=0.8.0
+
+
+# 資料視覺化與文字雲
+matplotlib>=3.11.0
+seaborn>=0.13.0
+wordcloud>=1.9.0
+
+
+# 5. 環境設定與公用工具
+python-dotenv>=1.2.0  # 讀取 .env 隱私 Token
+tqdm>=4.69.0          # 顯示訓練進度條
