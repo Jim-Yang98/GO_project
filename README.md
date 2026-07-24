@@ -24,7 +24,7 @@ python main.py
 ```
 
 ## 專案結構
--crawlers/: 各平台爬蟲模組
--utils/: 資料清理與格式轉換工具
--bert_train.py: BERT 模型訓練腳本
--reports/: Power BI 視覺化分析報表
+- crawlers/: 各平台爬蟲模組
+- utils/: 資料清理與格式轉換工具
+- bert_train.py: BERT 模型訓練腳本
+- reports/: Power BI 視覺化分析報表
