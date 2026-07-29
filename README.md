@@ -10,7 +10,7 @@
 
 ## 快速開始
 
-### 1. 安裝環境依賴
+### 1. 安裝環境
 ```bash
 pip install -r requirements.txt
 ```
