@@ -3,7 +3,9 @@ import json
 import os
 import pandas as pd
 import numpy as np
-import sqlite3
+import psycopg2
+from datetime import datetime
+from config import get_db_connection
 
 class DataConverter:
     def __init__(self):
@@ -12,8 +14,6 @@ class DataConverter:
     def merge_and_explode_platforms(self, folder_paths: list = None, data_list: list = None) -> pd.DataFrame:
 
         all_platform_data = []
-
-
 
         # 優先使用直接傳入的資料列表
         if data_list is not None:
@@ -114,6 +114,20 @@ class DataConverter:
         unique_str = f"{platform}_{post_time}_{author}_{short_title}"
         return hashlib.md5(unique_str.encode('utf-8')).hexdigest()
 
+    def load_json_file(self, file_path: str):
+        all_data = []
+        if not file_path or not os.path.exists(file_path):
+            print(f"警告：找不到檔案路徑 {file_path}")
+            return all_data
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_data = json.load(f)
+                if isinstance(file_data, list):
+                    all_data.extend(file_data)
+        except Exception as e:
+            print(f"讀取失敗: {file_path}，原因: {e}")
+        return all_data
+
     def load_json_folder(self, folder_path: str):
         all_data = []
         if not os.path.exists(folder_path):
@@ -133,51 +147,85 @@ class DataConverter:
                 print(f"讀取失敗: {file_path}，原因: {e}")
         return all_data
 
-    # 建立資料表架構 (徹底拔除 comment_tag)
+    # 建立資料表架構 (移除 comment_tag)
     def _create_tables(self, cursor, table_prefix):
-        # 貼文主表
+        # 貼文主表（不變）
         cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS {table_prefix}_posts (
                 post_id CHAR(32) PRIMARY KEY,
-                platform TEXT,
-                post_time TEXT,
-                author TEXT,
-                total_reac INTEGER,
-                title TEXT,
+                platform VARCHAR(50),
+                post_time TIMESTAMPTZ,
+                author VARCHAR(255),
+                total_reac INTEGER DEFAULT 0,
+                title TEXT NOT NULL,
                 content TEXT,
-                comment_count INTEGER
-            )
+                comment_count INTEGER DEFAULT 0,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
         ''')
-        # 留言副表 (拔除 comment_tag 欄位)
+        # 留言副表：comment_id 是內容 hash（跟 posts 表設計一致）
         cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS {table_prefix}_comments (
-                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                post_id CHAR(32),
-                comment_author TEXT,
+                comment_id CHAR(32) PRIMARY KEY,
+                post_id CHAR(32) REFERENCES {table_prefix}_posts(post_id) ON DELETE CASCADE,
+                comment_author VARCHAR(255),
                 comment TEXT,
-                FOREIGN KEY (post_id) REFERENCES {table_prefix}_posts (post_id)
-            )
+                like_count INTEGER DEFAULT 0,
+                comment_floor INTEGER,       -- 留言樓層
+                source_platform VARCHAR(50),
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
         ''')
 
+    # 檢查函式
+    def _is_valid_post(self, post):
+        title = post.get("title")
+        content = post.get("content", "") or ""
+        post_time_str = post.get("post_time")
 
-    # 統一中央處理器 (四個平台共用此邏輯)
+        # 標題驗證：空標題或全空白過濾掉
+        if not title or not str(title).strip():
+            return False
+
+        # 過濾刪除文
+        if "[文章已刪除]" in content or "[已刪除]" in str(title):
+            return False
+
+        # 發文時間驗證：若解析成功且晚於當前時間則過濾
+        if post_time_str:
+            try:
+                post_dt = pd.to_datetime(post_time_str)
+                if post_dt > datetime.now(post_dt.tz):
+                    return False
+            except Exception:
+                pass
+        return True
+
+    # 統一中央處理器
     def _insert_generic_data(self, cursor, data, table_prefix):
         self._create_tables(cursor, table_prefix)
-        
+
+        inserted_posts_count = 0
+        skipped_posts_count = 0
+
         for post in data:
-            # 計算貼文唯一 ID (用於資料庫防重複)
+            if not self._is_valid_post(post):
+                skipped_posts_count += 1
+                continue
+
             post_id = self.generate_md5_id(
-                post.get("platform"), 
-                post.get("post_time"), 
-                post.get("author"), 
+                post.get("platform"),
+                post.get("post_time"),
+                post.get("author"),
                 post.get("title")
             )
-            
-            # 寫入貼文主表
+
             cursor.execute(f'''
-                INSERT OR IGNORE INTO {table_prefix}_posts (
+                INSERT INTO {table_prefix}_posts (
                     post_id, platform, post_time, author, total_reac, title, content, comment_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (post_id) DO NOTHING;
             ''', (
                 post_id,
                 post.get("platform"),
@@ -188,64 +236,82 @@ class DataConverter:
                 post.get("content"),
                 post.get("comment_count")
             ))
-            
-            # 展開並寫入留言副表
+
+            inserted_posts_count += 1
+
             comments_data = post.get("comments_data", [])
-            for c in comments_data:
-                if not isinstance(c, dict):
-                    continue
-                cursor.execute(f'''
-                    INSERT INTO {table_prefix}_comments (
-                        post_id, comment_author, comment
-                    ) VALUES (?, ?, ?)
-                ''', (
-                    post_id,
-                    c.get("comment_author"),
-                    c.get("comment")
-                ))
+            if isinstance(comments_data, list):
+                for c in comments_data:
+                    if not isinstance(c, dict):
+                        continue
+
+                    comment_author = c.get("comment_author") or c.get("author") or "Unknown"
+                    comment_text = c.get("comment") or c.get("content") or ""
+                    like_count = c.get("like_count") or c.get("likes") or 0
+
+                    # comment_id：內容 hash，跟 posts 表設計一致
+                    raw_comment_id_str = f"{post_id}_{comment_author}_{comment_text}"
+                    comment_id = hashlib.md5(raw_comment_id_str.encode("utf-8")).hexdigest()
+
+                    cursor.execute(f'''
+                        INSERT INTO {table_prefix}_comments (
+                            comment_id, post_id, comment_author, comment, like_count, source_platform
+                        ) VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (comment_id) DO NOTHING;
+                    ''', (
+                        comment_id,
+                        post_id,
+                        comment_author,
+                        comment_text,
+                        like_count,
+                        post.get("platform")
+                    ))
 
 
-    # 各平台對應分流 (PTT 現在也整合進來了)
-    def _sqlite_ptt(self, cursor, data):
+    
+    # 各平台對應分流
+    def _postgres_ptt(self, cursor, data):
         self._insert_generic_data(cursor, data, "ptt")
 
-    def _sqlite_fb(self, cursor, data):
-        self._insert_generic_data(cursor, data, "fb")
-
-    def _sqlite_baha(self, cursor, data):
+    def _postgres_baha(self, cursor, data):
         self._insert_generic_data(cursor, data, "baha")
 
-    def _sqlite_dcard(self, cursor, data):
+    def _postgres_dcard(self, cursor, data):
         self._insert_generic_data(cursor, data, "dcard")
 
-
-    # 主進入點流程
-    def json_to_sqlite(self, folder_path, db_name, platform):
-        data = self.load_json_folder(folder_path)
+    # 主流程
+    def json_to_postgres(self, data, platform):
+        """
+        :param data: 已清洗的資料（list of dict），而非檔案路徑
+        """
         if not data:
-            print(f"[{platform}] 錯誤: 資料夾內無資料或路徑錯誤")
+            print(f"[{platform}] 錯誤: 沒有資料可寫入")
             return
-        
-        sqlite_process_map = {
-            "ptt": self._sqlite_ptt,
-            "fb": self._sqlite_fb,
-            "baha": self._sqlite_baha,
-            "dcard": self._sqlite_dcard
+
+        process_map = {
+            "ptt": self._postgres_ptt,
+            "baha": self._postgres_baha,
+            "dcard": self._postgres_dcard
         }
 
-        process_func = sqlite_process_map.get(platform.lower())
+        process_func = process_map.get(platform.lower())
         if not process_func:
             raise ValueError(f"未支援該類型平台: {platform}")
-            
+
+        conn = None
         try:
-            con = sqlite3.connect(db_name)
-            cursor = con.cursor()
-            cursor.execute("PRAGMA foreign_keys = ON;")
-            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
             process_func(cursor, data)
-            
-            con.commit()
-            con.close()
-            print(f" 成功將 [{platform}] 轉入 SQLite 資料庫: {db_name} (共 {len(data)} 篇貼文)")
+
+            conn.commit()
+            cursor.close()
+            print(f"成功將 [{platform}] 轉入 PostgreSQL 資料庫！")
         except Exception as e:
-            print(f" SQLite 匯入失敗: {e}")
+            if conn:
+                conn.rollback()
+            print(f"PostgreSQL 匯入失敗: {e}")
+        finally:
+            if conn:
+                conn.close()

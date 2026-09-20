@@ -4,10 +4,16 @@ from datetime import datetime
 from crawlers.base_crawler import BaseCrawler
 import re
 import random
-from DrissionPage import ChromiumPage
+from DrissionPage import ChromiumOptions, ChromiumPage
+from pyvirtualdisplay import Display
+
+class DcardParseError(Exception):
+    """page_to_json 解析失敗：可能原因有被擋、網頁改版、或需要重新登入驗證"""
+    pass
+
 
 class dcardcrawler(BaseCrawler):
-    default_pages = 1
+    default_safety_pages = 1
 
     def __init__(self, save_folder="dcard_data"):
         super().__init__(topic_name="dcard", save_folder=save_folder)
@@ -37,18 +43,13 @@ class dcardcrawler(BaseCrawler):
                 f"https://www.dcard.tw/service/api/v3/search/posts?"
                 f"query={query}&field=all&highlight=false&sort=latest&country=TW&nsfw=true&platform=web"
             )
-        elif mode == "forum":
-            target_forum = forum if forum else query
-            front_url = f"https://www.dcard.tw/f/{target_forum}?tab=latest"
-            api_url = f"https://www.dcard.tw/service/api/v3/forums/{target_forum}/posts?sort=new"
-                
         else:
             raise ValueError(f"未知的 Dcard 爬取模式: {mode}")
 
         return front_url, api_url
     
-    def page_to_json(self, page):
-        match = re.search(r'<pre>(.*?)</pre>', page.html, re.S)
+    def page_to_json(self, safety_pages):
+        match = re.search(r'<pre>(.*?)</pre>', safety_pages.html, re.S)
         if not match:
             return None
         try:
@@ -101,14 +102,18 @@ class dcardcrawler(BaseCrawler):
             return data
         return []
     
-    def format_data(self, post, comments):
-        # 時間
+    def _parse_post_date(self, post):
+        """回傳 'YYYY-MM-DD'；解析失敗回傳 None（不算命中）"""
         raw_time = post.get('createdAt', '')
         try:
             dt = datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
-            post_time = dt.strftime("%Y-%m-%d")
-        except:
-            post_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S") # 容錯處理
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    
+    def format_data(self, post, comments):
+        # 時間（解析失敗時 fallback 為今天，不影響停止判斷）
+        post_time = self._parse_post_date(post) or datetime.now().strftime("%Y-%m-%d")
 
         # 作者
         author = post.get('school') or post.get('department')
@@ -123,12 +128,11 @@ class dcardcrawler(BaseCrawler):
         # 留言
         formatted_comments = []
         for c in comments:
-            if not isinstance(c, dict): continue
-            # 抓取留言學校/卡稱，若匿名則給 Anonymous
+            if not isinstance(c, dict):
+                continue
             c_author = c.get("school") or c.get("department")
             if c.get("anonymous", True) or not c_author:
                 c_author = "Anonymous"
-                
             formatted_comments.append({
                 "comment_author": c_author,
                 "comment": c.get("content", "")
@@ -149,6 +153,17 @@ class dcardcrawler(BaseCrawler):
     def crawl_all_pages(self, page, base_url, max_pages, comment_limit, mode):
         next_key = None
         all_data = []
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        miss_streak = 0
+        MAX_MISS = 3
+
+        def _no_data_result():
+            today_display = datetime.now().strftime("%y/%m/%d")
+            return {
+                "status": "no_data",
+                "message": f"日期 {today_display} 平台 Dcard 沒有相關文章",
+                "data": []
+            }
 
         for page_num in range(max_pages):
             print(f"\n 第 {page_num+1} 頁 ")
@@ -172,36 +187,43 @@ class dcardcrawler(BaseCrawler):
                 post_id = post.get("id")
                 if not post_id:
                     continue
-                
-                # 抓原始留言
+
+                post_date = self._parse_post_date(post)
+
+                if post_date is None:
+                    print(f"文章 {post_id} 日期解析失敗，跳過")
+                    continue
+
+                if post_date != today_str:
+                    miss_streak += 1
+                    print(f"非當天文章（{post_date}），連續未命中 {miss_streak}/{MAX_MISS}")
+                    if miss_streak >= MAX_MISS:
+                        print(f"已連續 {MAX_MISS} 篇非當天文章，停止抓取")
+                        if not all_data:
+                            return _no_data_result()
+                        return {"status": "ok", "message": None, "data": all_data}
+                    continue
+
+                miss_streak = 0
+
                 comments = self.fetch_comments(page, post_id, comment_limit)
                 print(f"留言 ({len(comments)} 則):")
-
                 for c in comments:
                     if not isinstance(c, dict):
                         continue
                     floor = c.get("floor", "?")
                     text = c.get("content", "")
-                    print(f"  {floor}F: {text[:20]}...")
+                    print(f"  {floor}F: {text[:10]}...")
                     time.sleep(random.uniform(2, 4))
-                    # comment_list.append({
-                    #     "comment": text
-                    # })
 
                 formatted_post = self.format_data(post, comments)
                 all_data.append(formatted_post)
-
                 time.sleep(random.uniform(1, 2))
 
-                    # if post_time < "2025-01-01": 
-                    #     print("已到達目標日期，停止抓取")
-                    #     return all_data
-
-                # 取得下一頁密鑰
+            # 取得下一頁密鑰
             if isinstance(data, dict):
                 next_key = data.get("nextKey")
             elif isinstance(data, list) and data:
-                # 純看板模式的分頁通常是用最後一篇文章的 id 當作 before 參數
                 next_key = data[-1].get("id")
                 base_url = base_url.split('&before=')[0] + f"&before={next_key}"
             else:
@@ -210,34 +232,47 @@ class dcardcrawler(BaseCrawler):
             if not next_key:
                 print("已經到達最後一頁")
                 break
-                
-        return all_data
 
-    def run(self, mode="topic", query=None, forum=None, pages=2, comment_limit=2, **kwargs):
+        if not all_data:
+            return _no_data_result()
+        return {"status": "ok", "message": None, "data": all_data}
+
+    def run(self, mode="topic", query=None, forum=None, safety_pages=2, comment_limit=5, **kwargs):
         """
         泛用型
-        param mode: 'topic' (話題) 或 'search' (搜尋) 或 'forum' (純看板)
         param query: 關鍵字或話題名稱 (例如 'PokemonGO')
         param forum: 限定看板名稱 (例如 'pokemon')
         """
         if not query and mode != "forum":
             raise ValueError("在當前模式下，必須提供 query 參數")
         
-        # 透過建構器取得對應網址
+        # 建立前端網址與後端 api網址
         front_url, base_url = self._build_urls(mode, query, forum)
 
         print(f"開始執行 dcard 爬蟲 [模式: {mode}]")
         print(f"前端網址: {front_url}")
 
-        page = ChromiumPage()
-        page.get(front_url)
+        co = ChromiumOptions()
+        co.set_browser_path('/usr/bin/chromium')
+        co.headless(True)
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-dev-shm-usage')
+        page = ChromiumPage(addr_or_opts=co)
 
-        input("過驗證出現正常畫面後回 VS code 按下 Enter")
+        try:
+            page.get(front_url)
+            page.get_screenshot(path='/opt/airflow/dags/debug_dcard.png')  # 暫時加入，用來檢查實際載入的畫面
+            result = self.crawl_all_pages(page, base_url, safety_pages, comment_limit, mode)
 
-        # 開始爬取
-        data = self.crawl_all_pages(page, base_url, pages, comment_limit, mode)
 
-        file_name = f"{mode}_{query or forum}"
-        self.save_data(data, f"{file_name}_result")
+            if result["status"] == "no_data":
+                result["raw_file_path"] = None
+                return result
 
-        page.quit()
+            today_str = datetime.now().strftime("%Y%m%d")
+            file_name = f"{mode}_{query or forum}_{today_str}"
+            raw_file_path = self.save_data(result["data"], f"{file_name}_result")
+            result["raw_file_path"] = raw_file_path
+            return result
+        finally:
+            page.quit()

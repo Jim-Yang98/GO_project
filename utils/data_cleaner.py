@@ -10,7 +10,6 @@ class DataCleaner:
     def clean(self, platform, data):
         platform_map = {
             "ptt": self.clean_ptt,
-            "fb": self.clean_fb,
             "baha": self.clean_baha,
             "dcard": self.clean_dcard
         }
@@ -28,9 +27,6 @@ class DataCleaner:
     def clean_baha(self, data):
         return self.core_filter_pipeline(data)
 
-    # fb
-    def clean_fb(self, data):
-        return self.core_filter_pipeline(data)
     
     # ptt:擷取文章tag
     def extract_article_tag(self, title):
@@ -123,24 +119,6 @@ class DataCleaner:
             clean_data.append(processed_article)
 
         return self.core_filter_pipeline(clean_data)
-    
-    def process_and_filter_comments(self, comments_list, comment_key="comment"):
-        if not isinstance(comments_list, list):
-            return []
-            
-        cleaned_list = []
-        for c in comments_list:
-            if isinstance(c, dict):
-                raw_text = c.get(comment_key, "")
-                cleaned_text = self.clean_text(raw_text)
-                    
-                if cleaned_text and cleaned_text.strip() != "":
-                    if len(cleaned_text) >= 5:
-                        cleaned_list.append({
-                            **c,
-                            "comment": cleaned_text
-                        })
-        return cleaned_list
 
     def core_filter_pipeline(self, data):
         results = []
@@ -152,26 +130,25 @@ class DataCleaner:
             raw_date = post.get("post_time")
             cleaned_date = self.clean_date(raw_date)
             
-            # 只要貼文日期不是 2025 年，整篇貼文跟留言通通不要
-            if not cleaned_date or not cleaned_date.startswith("2025"):
+            # # 只要貼文日期不是 2025 年，整篇貼文跟留言通通不要
+            # if not cleaned_date or not cleaned_date.startswith("2025"):
+            #     continue
+
+            if not cleaned_date:
                 continue
                 
-            # 在這裡直接清洗貼文內文
             raw_content = post.get("content", "")
             post["content"] = self.clean_text(raw_content)
 
-            # 更新貼文內的時間為標準格式
             post["post_time"] = cleaned_date
             
             # 進行留言清洗
             raw_comments = post.get("comments_data", [])
             cleaned_comments = self.process_and_filter_comments(raw_comments)
             
-            # 如果清洗後留言串變空了，整篇貼文主體也丟棄
             if not cleaned_comments:
                 continue
                 
-            # 更新留言資料，並放入最終清單
             post["comments_data"] = cleaned_comments
             results.append(post)
             
@@ -185,40 +162,34 @@ class DataCleaner:
             return None
         text = str(text)
 
-        # 統一將全形英數、全形標點轉為半形
         text = unicodedata.normalize('NFKC', text)
+        text = re.sub(r'[\n\r\t\xa0\u200b\u3000]', ' ', text)
 
-        # 移除網址
-        text = text.replace('\n', ' ').replace('\r', ' ').replace('\xa0', ' ')
-        text = re.sub(r'https?://[^\s\u4e00-\u9fa5<>""’‘指標“”‘’@!,]+', '', text)
-        text = re.sub(r'www\.[^\s\u4e00-\u9fa5<>""’‘指標“”‘’@!,]+', '', text)
+        url_pattern = r'(?:https?://|www\.)[^\s\u4e00-\u9fa5]+'
+        text = re.sub(url_pattern, '', text, flags=re.IGNORECASE)
 
         text = re.sub(r'@[a-zA-Z0-9_\.]+(?:/[^\s<>"]*)?(?:\?[^\s<>"]*)?', '', text)
-        # 被空白切斷的網址
-        text = re.sub(r'https?\s*:\s*/\s*/\S+', '', text,flags=re.IGNORECASE)
 
-        # 移除禮包
+        text = emoji.replace_emoji(text, replace="")
+
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F000-\U0001FFFF"  # 涵蓋Emoji
+            "\U00002600-\U000027BF"  # 雜項符號
+            "\U0001F600-\U0001F64F"  # 表情圖案
+            "]+", 
+            flags=re.UNICODE
+        )
+        text = emoji_pattern.sub(r'', text)
+
         text = re.sub(r'\b(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{8,}\b', '', text)
-        # 移除好友代碼
         text = re.sub(r'\b\d{12}\b|\b\d{4}\s\d{4}\s\d{4}\b', '', text)
-        # 移除巴哈特有的 hot
         text = re.sub(r'^HOT', '', text, flags=re.IGNORECASE)
 
-        # 移除#字號間的所有數字英文與標記
         text = re.sub(r'#[\w:]+#', '', text)
-        # 移除[]間所有內容
         text = re.sub(r'\[.*?\]', '', text)
-        # 拔除括號顏文字
         text = re.sub(r'\S*?\([^\s)]+?\)\S*?', '', text)
 
-        # 移除表情符號（BERT-Chinese 無法理解）
-        text = emoji.replace_emoji(text, replace="")
-        text = re.sub(r'(?i)(?<![a-zA-Z0-9])c(?![a-zA-Z0-9])', '', text)
-        text = re.sub(r'(?i)(?<![a-zA-Z0-9])c{2,}(?![a-zA-Z0-9])', '', text)
-        text = re.sub(r'(?i)(?<![a-zA-Z0-9])0.0(?![a-zA-Z0-9])', '', text)
-
-
-        # 轉換網路顏文字為對應中文
         text = re.sub(r'(?i)(?<![a-zA-Z0-9])QAQ(?![a-zA-Z0-9])', '好難過', text)
         text = re.sub(r'(?i)(?<![a-zA-Z0-9])QQ(?![a-zA-Z0-9])', '難過', text)
         text = re.sub(r'(?i)(?<![a-zA-Z0-9])orz(?![a-zA-Z0-9])', '無奈倒地', text)
@@ -228,32 +199,23 @@ class DataCleaner:
 
         text = re.sub(r'(?i)(?<![a-zA-Z0-9])[w]{2,}(?!\.)(?![a-zA-Z0-9])', '哈', text)
         text = re.sub(r'(?i)(?<![a-zA-Z0-9])[z]{2,}(?!\.)(?![a-zA-Z0-9])', '睡', text)
-        text = re.sub(r'(?i)(?<![a-zA-Z0-9])[w](?![a-zA-Z0-9])', '哈', text)
 
         text = re.sub(r'=\s*=+|=\s*-+\s*=', '無言', text)
         text = re.sub(r'@@+', '無奈', text)
         text = re.sub(r'><', '害羞', text)
         text = re.sub(r'=\s*3\s*=', '嘟嘴', text)
-        text = re.sub(r'(?i):\s*P\b', '', text)
-        text = re.sub(r'(?i):\s*D\b', '大笑', text) 
-        text = re.sub(r'(?i)=\s*D\b', '大笑', text)        
-        
-        # 處理 Emoji (若要給 CKIP 斷詞，直接移除)
-        text = emoji.replace_emoji(text, replace="")
 
-        # 清空所有特殊雜訊，只留中英數與基本標點
+
         text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\s!?,.:;@_=\-+*/~%()\\[\]{}<>]', '', text)
 
-        # 把拔除顏文字後可能留下的「空括號殘渣」清乾淨
+
         text = re.sub(r'\(\s*\)|\[\s*\]|\{\s*\}|<\s*>', '', text)
 
-        # 收斂中文重複字詞 (例如：啊啊啊啊啊 -> 啊啊)
+
         text = re.sub(r'(.)\1{2,}', r'\1\1', text)
 
-        # 多餘空白
-        text = re.sub(
-            r'\s+', ' ', text
-        )
+
+        text = re.sub(r'\s+', ' ', text)
 
         return text.strip()
     
@@ -270,7 +232,6 @@ class DataCleaner:
                 if (
                 cleaned_text
                 and cleaned_text.strip() != ""
-                and len(cleaned_text.strip()) > 5
                 ):
                     cleaned_list.append({
                         **c,
